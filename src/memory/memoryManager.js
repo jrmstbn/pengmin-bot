@@ -27,6 +27,12 @@ const SUMMARIZE_THRESHOLD = parseInt(process.env.SUMMARIZE_THRESHOLD || "16");
 // Key: `${userId}:${channelId}` → { history: [], summary: "" }
 const cache = new Map();
 
+// Ensure the DB schema exists on startup. Fire-and-forget — if DB is disabled
+// this is a no-op; if it fails we log and continue with in-memory only.
+db.initialize().catch((err) =>
+  logger.error("[Memory] DB initialization failed:", err.message),
+);
+
 /**
  * getHistory()
  * Returns the active conversation history and any compressed summary

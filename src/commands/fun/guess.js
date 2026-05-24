@@ -81,7 +81,9 @@ module.exports = {
     });
 
     collector.on("end", (collected, reason) => {
+      // Always release the channel lock regardless of how the game ended.
       activeGames.delete(channelId);
+
       if (reason === "win") return;
 
       if (reason === "time") {

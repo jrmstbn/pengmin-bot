@@ -103,6 +103,11 @@ async function chat(messages, systemPrompt) {
  * @returns {Promise<string>}
  */
 async function summarize(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    logger.warn("summarize() called with empty or invalid messages array — skipping.");
+    return "";
+  }
+
   const response = await openai.chat.completions.create({
     model: AI_CONFIG.model,
     max_tokens: 256,

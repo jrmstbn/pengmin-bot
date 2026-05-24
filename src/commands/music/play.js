@@ -5,7 +5,7 @@
  * If a song is already playing, adds it to the queue.
  */
 
-const { SlashCommandBuilder } = require("discord.js");
+const { SlashCommandBuilder, PermissionsBitField } = require("discord.js");
 const musicManager = require("../../music/musicManager");
 const {
   createAddedToQueueEmbed,
@@ -34,6 +34,21 @@ module.exports = {
       });
     }
 
+    // Check bot has permission to join and speak before attempting.
+    const botPermissions = voiceChannel.permissionsFor(interaction.guild.members.me);
+    if (!botPermissions?.has(PermissionsBitField.Flags.Connect)) {
+      return interaction.reply({
+        embeds: [createErrorEmbed("I don't have permission to join that voice channel.")],
+        ephemeral: true,
+      });
+    }
+    if (!botPermissions?.has(PermissionsBitField.Flags.Speak)) {
+      return interaction.reply({
+        embeds: [createErrorEmbed("I don't have permission to speak in that voice channel.")],
+        ephemeral: true,
+      });
+    }
+
     const query = interaction.options.getString("query", true);
     const guildId = interaction.guildId;
     const userId = interaction.user.id;
@@ -57,6 +72,13 @@ module.exports = {
       if (!state.connection || !state.player) {
         try {
           await musicManager.joinVoice(voiceChannel, guildId);
+          // Wire up auto-advance once at join time — not per /play invocation.
+          // This prevents duplicate Idle listeners from concurrent /play calls.
+          musicManager.setupAutoPlay(guildId, (nextTrack) => {
+            if (nextTrack) {
+              logger.info(`Auto-playing next track: ${nextTrack.title}`);
+            }
+          });
         } catch (err) {
           logger.error(`Failed to join voice channel:`, err);
           return interaction.editReply({
@@ -83,13 +105,6 @@ module.exports = {
 
       // If nothing is playing, start playback
       if (!state.currentTrack) {
-        // Setup auto-play for next tracks
-        musicManager.setupAutoPlay(guildId, (nextTrack) => {
-          if (nextTrack) {
-            logger.info(`Auto-playing next track: ${nextTrack.title}`);
-          }
-        });
-
         const playingTrack = await musicManager.play(guildId);
         if (playingTrack) {
           return interaction.editReply({

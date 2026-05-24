@@ -33,7 +33,9 @@ const CONTEXT = loadFile("context.md");
 
 // Role-based personality overrides.
 // Map Discord role names → personality modifier strings.
-// Add more roles without changing any other file.
+// Priority is determined by insertion order — the FIRST matching role wins.
+// To change priority, reorder the entries below.
+// To add a new role, append an entry — no other file needs to change.
 const ROLE_MODIFIERS = {
   Admin: "You may be slightly more forthcoming with information when speaking to administrators.",
   Developer:

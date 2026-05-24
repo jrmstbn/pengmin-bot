@@ -27,8 +27,18 @@ if (process.env.DATABASE_URL) {
     const { Pool } = require("pg");
     pool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      // ssl required for most cloud Postgres providers (Heroku, Railway, Supabase)
-      ssl: process.env.DB_SSL === "false" ? false : { rejectUnauthorized: false },
+      // SSL behaviour:
+      //   DB_SSL=true  (default) — validates the server certificate. Required for production.
+      //   DB_SSL=false           — disables SSL entirely (local dev only).
+      //   DB_SSL=no-verify       — connects over SSL but skips cert validation.
+      //                           Use only when your provider doesn't supply a CA cert
+      //                           and you accept the MITM risk (e.g. some free-tier hosts).
+      ssl: (() => {
+        const val = process.env.DB_SSL;
+        if (val === "false") return false;
+        if (val === "no-verify") return { rejectUnauthorized: false };
+        return true; // default: full certificate validation
+      })(),
       max: 10,
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 2_000,

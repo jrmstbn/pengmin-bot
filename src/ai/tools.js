@@ -11,6 +11,7 @@
  */
 
 const logger = require("../utils/logger");
+const { isSafeUrl } = require("../middleware/security");
 
 // ─── Tool Definitions (OpenAI format) ────────────────────────────────────────
 
@@ -147,7 +148,10 @@ async function getLatestNews(country = "ph", category = "general") {
   url.searchParams.set("pageSize", "5");
   url.searchParams.set("apiKey", process.env.NEWS_API_KEY);
 
-  const res = await fetch(url.toString());
+  const urlStr = url.toString();
+  if (!isSafeUrl(urlStr)) throw new Error("NewsAPI URL failed safety check.");
+
+  const res = await fetch(urlStr);
   if (!res.ok) throw new Error(`NewsAPI error: ${res.status}`);
 
   const data = await res.json();
@@ -167,7 +171,10 @@ async function searchWeb(query) {
     return { error: "TAVILY_API_KEY not configured." };
   }
 
-  const res = await fetch("https://api.tavily.com/search", {
+  const endpoint = "https://api.tavily.com/search";
+  if (!isSafeUrl(endpoint)) throw new Error("Tavily URL failed safety check.");
+
+  const res = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -202,7 +209,10 @@ async function getGif(searchTerm) {
     url.searchParams.set("limit", "1");
     url.searchParams.set("contentfilter", "medium");
 
-    const res = await fetch(url.toString());
+    const urlStr = url.toString();
+    if (!isSafeUrl(urlStr)) throw new Error("Tenor URL failed safety check.");
+
+    const res = await fetch(urlStr);
     const data = await res.json();
     const gif = data.results?.[0]?.media_formats?.gif?.url;
     return gif ? { url: gif } : { error: "No GIF found." };
@@ -215,7 +225,10 @@ async function getGif(searchTerm) {
   url.searchParams.set("limit", "1");
   url.searchParams.set("rating", "pg-13");
 
-  const res = await fetch(url.toString());
+  const urlStr = url.toString();
+  if (!isSafeUrl(urlStr)) throw new Error("Giphy URL failed safety check.");
+
+  const res = await fetch(urlStr);
   const data = await res.json();
   const gif = data.data?.[0]?.images?.original?.url;
   return gif ? { url: gif } : { error: "No GIF found." };

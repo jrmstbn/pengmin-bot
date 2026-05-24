@@ -42,6 +42,8 @@ class MusicManager {
         currentTrack: null,
         isPaused: false,
         loopMode: "off", // off, one, all
+        volume: 1.0,     // stored so new resources pick it up
+        _skipIdle: false, // suppresses Idle handler during manual skip/stop
       });
     }
     return this.guilds.get(guildId);
@@ -258,6 +260,9 @@ class MusicManager {
         inlineVolume: true,
       });
 
+      // Apply stored volume so it persists across tracks.
+      resource.volume?.setVolume(state.volume ?? 1.0);
+
       state.currentTrack = track;
       state.isPaused = false;
       state.player.play(resource);
@@ -278,6 +283,11 @@ class MusicManager {
    * Binds an Idle listener to automatically advance the queue when a track ends.
    * Removes any existing Idle listener first to prevent duplicates.
    *
+   * Loop mode behaviour:
+   *   "off" — advance to next track normally
+   *   "one" — re-insert the finished track at the front of the queue
+   *   "all" — push the finished track to the back of the queue
+   *
    * @param {string} guildId
    * @param {Function} onTrackEnd - Called with the next track (or null if queue ended)
    */
@@ -289,6 +299,25 @@ class MusicManager {
     state.player.removeAllListeners(AudioPlayerStatus.Idle);
 
     state.player.on(AudioPlayerStatus.Idle, async () => {
+      // Skip if this Idle event was triggered by a manual skip/stop —
+      // those operations set _skipIdle to suppress the auto-advance.
+      if (state._skipIdle) {
+        state._skipIdle = false;
+        return;
+      }
+
+      // Apply loop mode before advancing the queue.
+      const finished = state.currentTrack;
+      if (finished) {
+        if (state.loopMode === "one") {
+          // Re-insert at the front so play() picks it up next.
+          state.queue.unshift(finished);
+        } else if (state.loopMode === "all") {
+          // Push to the back to cycle through the full queue.
+          state.queue.push(finished);
+        }
+      }
+
       const nextTrack = await this.play(guildId);
 
       if (onTrackEnd) {
@@ -346,11 +375,17 @@ class MusicManager {
    * skip()
    * Stops the current track and immediately plays the next one in queue.
    *
+   * Sets _skipIdle = true before stopping so the Idle event fired by
+   * player.stop() does not trigger the auto-play handler — we call
+   * play() directly here instead.
+   *
    * @returns {Promise<Object|null>} Next track or null if queue is empty
    */
   async skip(guildId) {
     const state = this.getGuildState(guildId);
     if (state.player) {
+      // Suppress the Idle listener so it doesn't double-advance the queue.
+      state._skipIdle = true;
       state.player.stop();
       return this.play(guildId);
     }
@@ -364,12 +399,36 @@ class MusicManager {
   stop(guildId) {
     const state = this.getGuildState(guildId);
     if (state.player) {
+      // Suppress the Idle listener so it doesn't try to auto-play after stop.
+      state._skipIdle = true;
       state.player.stop();
     }
     state.queue = [];
     state.currentTrack = null;
     state.isPaused = false;
     logger.debug(`Stopped and queue cleared [${guildId}]`);
+  }
+
+  /**
+   * setVolume()
+   * Sets the playback volume (0.0–1.0 scale) and persists it on guild state
+   * so new tracks automatically start at the same level.
+   *
+   * @param {string} guildId
+   * @param {number} volume  0.0 (mute) to 1.0 (full)
+   * @returns {boolean} true if applied to the active resource, false otherwise
+   */
+  setVolume(guildId, volume) {
+    const state = this.getGuildState(guildId);
+    // Clamp to valid range.
+    state.volume = Math.max(0, Math.min(1, volume));
+    // Apply immediately if a resource is active.
+    const resource = state.player?.state?.resource;
+    if (resource?.volume) {
+      resource.volume.setVolume(state.volume);
+      return true;
+    }
+    return false;
   }
 
   /**

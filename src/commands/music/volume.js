@@ -33,26 +33,12 @@ module.exports = {
       });
     }
 
-    if (!state.player || !state.player.state.resource) {
-      return interaction.reply({
-        embeds: [createErrorEmbed("Cannot adjust volume at this time.")],
-        ephemeral: true,
-      });
-    }
+    // setVolume() stores the value on state and applies it to the active resource.
+    // Convert 0-100 to 0.0-1.0 scale.
+    musicManager.setVolume(guildId, level / 100);
 
-    try {
-      // Convert 0-100 to 0-1 scale for Discord.js
-      const volume = level / 100;
-      state.player.state.resource.volume.setVolume(volume);
-
-      return interaction.reply({
-        embeds: [createInfoEmbed("🔊 Volume", `Volume set to **${level}%**.`)],
-      });
-    } catch (err) {
-      return interaction.reply({
-        embeds: [createErrorEmbed("Failed to adjust volume.")],
-        ephemeral: true,
-      });
-    }
+    return interaction.reply({
+      embeds: [createInfoEmbed("🔊 Volume", `Volume set to **${level}%**.`)],
+    });
   },
 };
