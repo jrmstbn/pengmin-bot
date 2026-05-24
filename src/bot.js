@@ -22,6 +22,7 @@ const CommandHandler = require("./handlers/commandHandler");
 const { handleMessage } = require("./ai/aiController");
 const RateLimiter = require("./middleware/rateLimiter");
 const { sanitizeInput } = require("./middleware/security");
+const musicManager = require("./music/musicManager");
 
 /**
  * createBot — initializes and returns a fully configured Discord Client.
@@ -46,6 +47,9 @@ async function createBot() {
     maxRequests: 1, // 1 AI request per window per user
   });
 
+  // Initialize DisTube — must happen before any music commands run.
+  musicManager.initDistube(client);
+
   // ─── Load slash commands ──────────────────────────────────────────────────
   const commandHandler = new CommandHandler(client);
   await commandHandler.loadAll();
@@ -58,7 +62,7 @@ async function createBot() {
 
   // ─── Events ───────────────────────────────────────────────────────────────
 
-  client.once("ready", () => {
+  client.once("clientReady", () => {
     logger.info(
       `[Protocol Network] ${client.user.tag} is online. Endministrator is ready.`
     );
@@ -79,10 +83,18 @@ async function createBot() {
       await command.execute(interaction, client);
     } catch (err) {
       logger.error(`Command error [${interaction.commandName}]:`, err);
-      const msg = { content: "`*System error. Protocol interrupted.*`", ephemeral: true };
-      interaction.replied || interaction.deferred
-        ? await interaction.followUp(msg)
-        : await interaction.reply(msg);
+      // Only respond if the interaction hasn't expired (10062) or been double-acked (40060)
+      try {
+        const msg = { content: "`*System error. Protocol interrupted.*`", flags: 64 };
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp(msg);
+        } else {
+          await interaction.reply(msg);
+        }
+      } catch (replyErr) {
+        // Interaction expired or already handled — nothing we can do
+        logger.warn(`Could not send error reply [${interaction.commandName}]: ${replyErr.message}`);
+      }
     }
   });
 

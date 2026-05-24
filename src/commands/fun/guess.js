@@ -29,7 +29,7 @@ module.exports = {
     if (activeGames.has(channelId)) {
       return interaction.reply({
         content: "`*A calibration sequence is already active in this channel.*`",
-        ephemeral: true,
+        flags: 64,
       });
     }
 

@@ -6,7 +6,6 @@
  */
 
 require("dotenv").config();
-const play = require("play-dl");
 const { createBot } = require("./src/bot");
 const logger = require("./src/utils/logger");
 
@@ -31,15 +30,6 @@ process.on("uncaughtException", (err) => {
 // Boot the bot.
 (async () => {
   try {
-    // Load YouTube token if available
-    try {
-      if (play.is_expired()) {
-        await play.refreshToken();
-      }
-    } catch (err) {
-      logger.warn("YouTube token not found. Run 'node scripts/auth.js' to authenticate.");
-    }
-
     const client = await createBot();
     await client.login(process.env.DISCORD_TOKEN);
   } catch (err) {

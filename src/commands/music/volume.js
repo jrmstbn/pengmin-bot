@@ -2,6 +2,7 @@
  * src/commands/music/volume.js — Volume Command
  *
  * Adjusts the playback volume (0-100).
+ * DisTube uses 0-100 natively — no conversion needed.
  */
 
 const { SlashCommandBuilder } = require("discord.js");
@@ -29,13 +30,19 @@ module.exports = {
     if (!state.currentTrack) {
       return interaction.reply({
         embeds: [createErrorEmbed("No song is currently playing.")],
-        ephemeral: true,
+        flags: 64,
       });
     }
 
-    // setVolume() stores the value on state and applies it to the active resource.
-    // Convert 0-100 to 0.0-1.0 scale.
-    musicManager.setVolume(guildId, level / 100);
+    // DisTube setVolume takes 0-100 directly
+    const applied = musicManager.setVolume(guildId, level);
+
+    if (!applied) {
+      return interaction.reply({
+        embeds: [createErrorEmbed("Failed to set volume.")],
+        flags: 64,
+      });
+    }
 
     return interaction.reply({
       embeds: [createInfoEmbed("🔊 Volume", `Volume set to **${level}%**.`)],

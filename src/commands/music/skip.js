@@ -21,19 +21,34 @@ module.exports = {
     if (!state.currentTrack) {
       return interaction.reply({
         embeds: [createErrorEmbed("No song is currently playing.")],
-        ephemeral: true,
+        flags: 64,
+      });
+    }
+
+    if (state.queue.length === 0) {
+      // No next song — stop and leave
+      try {
+        await musicManager.stop(guildId);
+      } catch (_) {}
+      return interaction.reply({
+        embeds: [createInfoEmbed("⏭️ Skipped", "No more songs in the queue.")],
       });
     }
 
     try {
-      const nextTrack = await musicManager.skip(guildId);
-
-      if (nextTrack) {
+      const nextSong = await musicManager.skip(guildId);
+      if (nextSong) {
         return interaction.reply({
-          embeds: [createNowPlayingEmbed(nextTrack)],
+          embeds: [createNowPlayingEmbed({
+            title: nextSong.name,
+            url: nextSong.url,
+            duration: nextSong.duration,
+            thumbnail: nextSong.thumbnail,
+            channel: nextSong.uploader?.name ?? "Unknown",
+            requesterName: nextSong.member?.user?.username ?? "Unknown",
+          })],
         });
       }
-
       return interaction.reply({
         embeds: [createInfoEmbed("⏭️ Skipped", "No more songs in the queue.")],
       });
@@ -41,7 +56,7 @@ module.exports = {
       logger.error(`Skip command error:`, err);
       return interaction.reply({
         embeds: [createErrorEmbed("Failed to skip the song.")],
-        ephemeral: true,
+        flags: 64,
       });
     }
   },

@@ -53,7 +53,7 @@ module.exports = {
         )
         .setFooter({ text: "Memory is finite. Summaries preserve what matters." });
 
-      return interaction.reply({ embeds: [embed], ephemeral: true });
+      return interaction.reply({ embeds: [embed], flags: 64 });
     }
 
     if (sub === "forget") {
@@ -62,7 +62,7 @@ module.exports = {
         content:
           "`*Memory purge complete. Your record has been cleared from this channel.*`\n" +
           "`This does not affect other channels or the global summary.*`",
-        ephemeral: true,
+        flags: 64,
       });
     }
   },

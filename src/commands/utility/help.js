@@ -37,6 +37,6 @@ module.exports = {
       embed.setDescription("`*No directives registered.*`");
     }
 
-    await interaction.reply({ embeds: [embed], ephemeral: true });
+    await interaction.reply({ embeds: [embed], flags: 64 });
   },
 };

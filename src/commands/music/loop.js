@@ -33,7 +33,7 @@ module.exports = {
     if (!success) {
       return interaction.reply({
         embeds: [createErrorEmbed("Invalid loop mode.")],
-        ephemeral: true,
+        flags: 64,
       });
     }
 

@@ -20,7 +20,7 @@ module.exports = {
     if (!currentTrack) {
       return interaction.reply({
         embeds: [createErrorEmbed("No song is currently playing.")],
-        ephemeral: true,
+        flags: 64,
       });
     }
 

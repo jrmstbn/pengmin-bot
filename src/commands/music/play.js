@@ -1,15 +1,18 @@
 /**
  * src/commands/music/play.js — Play Command
  *
- * Searches for a song by query (title, artist, lyrics, or URL) and plays it.
- * If a song is already playing, adds it to the queue.
+ * Interaction flow:
+ *   1. deferReply() immediately (must be within Discord's 3s window)
+ *   2. Register a per-guild one-shot callback via musicManager.setPendingCallback()
+ *   3. Call musicManager.play() — DisTube fires playSong or addSong
+ *   4. The central handler in musicManager dispatches to our callback → editReply()
  */
 
 const { SlashCommandBuilder, PermissionsBitField } = require("discord.js");
 const musicManager = require("../../music/musicManager");
 const {
-  createAddedToQueueEmbed,
   createNowPlayingEmbed,
+  createAddedToQueueEmbed,
   createErrorEmbed,
 } = require("../../music/musicUtils");
 const logger = require("../../utils/logger");
@@ -27,101 +30,91 @@ module.exports = {
 
   async execute(interaction) {
     const voiceChannel = interaction.member?.voice?.channel;
+
     if (!voiceChannel) {
       return interaction.reply({
         embeds: [createErrorEmbed("You must be in a voice channel to play music.")],
-        ephemeral: true,
+        flags: 64,
       });
     }
 
-    // Check bot has permission to join and speak before attempting.
     const botPermissions = voiceChannel.permissionsFor(interaction.guild.members.me);
     if (!botPermissions?.has(PermissionsBitField.Flags.Connect)) {
       return interaction.reply({
         embeds: [createErrorEmbed("I don't have permission to join that voice channel.")],
-        ephemeral: true,
+        flags: 64,
       });
     }
     if (!botPermissions?.has(PermissionsBitField.Flags.Speak)) {
       return interaction.reply({
         embeds: [createErrorEmbed("I don't have permission to speak in that voice channel.")],
-        ephemeral: true,
+        flags: 64,
       });
     }
 
-    const query = interaction.options.getString("query", true);
-    const guildId = interaction.guildId;
-    const userId = interaction.user.id;
-    const userName = interaction.user.username;
-
+    // Defer immediately — must happen within Discord's 3-second window
     await interaction.deferReply();
 
+    const query = interaction.options.getString("query", true);
+    const guildId = interaction.guildId;
+
+    // Safety timeout — clears the callback if DisTube never fires within 15s
+    const timeoutId = setTimeout(() => {
+      musicManager.clearPendingCallback(guildId);
+      interaction.editReply({
+        embeds: [createErrorEmbed("Request timed out. Could not load the song.")],
+      }).catch(() => {});
+    }, 15_000);
+
+    // Register one-shot callbacks — dispatched by the central handlers in musicManager
+    musicManager.setPendingCallback(guildId, {
+      onPlay: (queue, song) => {
+        clearTimeout(timeoutId);
+        interaction.editReply({
+          embeds: [createNowPlayingEmbed({
+            title: song.name,
+            url: song.url,
+            duration: song.duration,
+            thumbnail: song.thumbnail,
+            channel: song.uploader?.name ?? "Unknown",
+            requesterName: song.member?.user?.username ?? interaction.user.username,
+          })],
+        }).catch(() => {});
+      },
+
+      onAdd: (queue, song) => {
+        clearTimeout(timeoutId);
+        const position = queue.songs.length - 1;
+        interaction.editReply({
+          embeds: [createAddedToQueueEmbed({
+            title: song.name,
+            url: song.url,
+            duration: song.duration,
+            thumbnail: song.thumbnail,
+            channel: song.uploader?.name ?? "Unknown",
+            requesterName: song.member?.user?.username ?? interaction.user.username,
+          }, position)],
+        }).catch(() => {});
+      },
+
+      onErr: (error) => {
+        clearTimeout(timeoutId);
+        logger.error(`DisTube play error [${guildId}]:`, error);
+        interaction.editReply({
+          embeds: [createErrorEmbed("Failed to play that song. Try a different search or URL.")],
+        }).catch(() => {});
+      },
+    });
+
     try {
-      // Search for the song
-      logger.info(`Searching for: ${query}`);
-      const trackInfo = await musicManager.search(query);
-
-      if (!trackInfo) {
-        return interaction.editReply({
-          embeds: [createErrorEmbed(`No results found for "${query}".`)],
-        });
-      }
-
-      // Join voice channel if not already connected
-      const state = musicManager.getState(guildId);
-      if (!state.connection || !state.player) {
-        try {
-          await musicManager.joinVoice(voiceChannel, guildId);
-          // Wire up auto-advance once at join time — not per /play invocation.
-          // This prevents duplicate Idle listeners from concurrent /play calls.
-          musicManager.setupAutoPlay(guildId, (nextTrack) => {
-            if (nextTrack) {
-              logger.info(`Auto-playing next track: ${nextTrack.title}`);
-            }
-          });
-        } catch (err) {
-          logger.error(`Failed to join voice channel:`, err);
-          return interaction.editReply({
-            embeds: [createErrorEmbed("Failed to join your voice channel.")],
-          });
-        }
-      }
-
-      // Create track object with metadata
-      const track = {
-        title: trackInfo.title,
-        url: trackInfo.url,
-        duration: trackInfo.duration,
-        thumbnail: trackInfo.thumbnail,
-        channel: trackInfo.channel,
-        requesterId: userId,
-        requesterName: userName,
-        videoObject: trackInfo.videoObject,
-      };
-
-      // Add to queue
-      const queueLength = state.queue.length;
-      musicManager.addToQueue(guildId, track);
-
-      // If nothing is playing, start playback
-      if (!state.currentTrack) {
-        const playingTrack = await musicManager.play(guildId);
-        if (playingTrack) {
-          return interaction.editReply({
-            embeds: [createNowPlayingEmbed(playingTrack)],
-          });
-        }
-      }
-
-      // Song added to queue
-      return interaction.editReply({
-        embeds: [createAddedToQueueEmbed(track, queueLength + 1)],
-      });
+      await musicManager.play(voiceChannel, query, interaction.member, interaction.channel);
     } catch (err) {
-      logger.error(`Play command error:`, err);
-      return interaction.editReply({
+      clearTimeout(timeoutId);
+      musicManager.clearPendingCallback(guildId);
+      logger.error(`Play command error [${guildId}]:`, err);
+      interaction.editReply({
         embeds: [createErrorEmbed("An error occurred while processing your request.")],
-      });
+      }).catch(() => {});
     }
   },
 };

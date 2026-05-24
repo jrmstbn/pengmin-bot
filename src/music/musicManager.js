@@ -1,507 +1,228 @@
 /**
- * src/music/musicManager.js — Centralized Music Playback Manager
+ * src/music/musicManager.js — DisTube-backed Music Manager
  *
- * Manages per-guild music state including:
- *   - Voice connections
- *   - Audio players
- *   - Song queues with metadata
- *   - Playback state (playing, paused, stopped)
- *   - Loop modes
+ * Wraps DisTube v5 and exposes the same interface the music commands use.
  *
- * Architecture: Singleton pattern — one instance manages all guilds.
+ * Key design decisions:
+ *   - ffmpeg-static is passed to DisTube so no system ffmpeg is required.
+ *   - Per-guild callbacks replace per-invocation event listeners, eliminating
+ *     the MaxListeners leak. Each guild stores one pending callback at a time;
+ *     the central handlers dispatch to it and clean up immediately.
  */
 
-const {
-  joinVoiceChannel,
-  createAudioPlayer,
-  createAudioResource,
-  AudioPlayerStatus,
-  VoiceConnectionStatus,
-  NoSubscriberBehavior,
-  entersState,
-} = require("@discordjs/voice");
-const play = require("play-dl");
+const { DisTube, RepeatMode } = require("distube");
+const { YouTubePlugin } = require("@distube/youtube");
+const ffmpegPath = require("ffmpeg-static");
 const logger = require("../utils/logger");
 
 class MusicManager {
   constructor() {
-    // Map<guildId, GuildMusicState>
-    this.guilds = new Map();
+    /** @type {DisTube|null} */
+    this.distube = null;
+
+    /**
+     * Per-guild pending callbacks set by play.js before calling play().
+     * Shape: Map<guildId, { onPlay, onAdd, onErr }>
+     */
+    this._callbacks = new Map();
   }
 
-  /**
-   * getGuildState()
-   * Retrieves or initializes music state for a guild.
-   */
-  getGuildState(guildId) {
-    if (!this.guilds.has(guildId)) {
-      this.guilds.set(guildId, {
-        connection: null,
-        player: null,
-        queue: [],
-        currentTrack: null,
-        isPaused: false,
-        loopMode: "off", // off, one, all
-        volume: 1.0,     // stored so new resources pick it up
-        _skipIdle: false, // suppresses Idle handler during manual skip/stop
-      });
-    }
-    return this.guilds.get(guildId);
-  }
+  // ─── Initialization ────────────────────────────────────────────────────────
 
   /**
-   * joinVoice()
-   * Joins a voice channel and sets up the audio player.
+   * initDistube()
+   * Must be called once with the Discord client before any music commands run.
    *
-   * @param {VoiceChannel} voiceChannel
-   * @param {string} guildId
-   * @returns {Promise<Object>} { connection, player }
+   * @param {import("discord.js").Client} client
    */
-  async joinVoice(voiceChannel, guildId) {
-    const state = this.getGuildState(guildId);
+  initDistube(client) {
+    // Tell DisTube where ffmpeg lives — uses the bundled ffmpeg-static binary.
+    process.env.FFMPEG_PATH = ffmpegPath;
 
-    // Already connected — reuse existing connection and player
-    if (state.connection && state.player) {
-      return { connection: state.connection, player: state.player };
-    }
+    this.distube = new DisTube(client, {
+      plugins: [new YouTubePlugin()],
+      ffmpeg: { path: ffmpegPath },
+      emitNewSongOnly: false,
+      joinNewVoiceChannel: true,
+    });
 
-    try {
-      const connection = joinVoiceChannel({
-        channelId: voiceChannel.id,
-        guildId,
-        adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-        selfDeaf: false,
-      });
+    // ── Central event handlers ──────────────────────────────────────────────
+    // These are registered ONCE here, not per /play invocation.
+    // play.js registers a per-guild callback via setPendingCallback() before
+    // calling play(); these handlers dispatch to it and clear it immediately.
 
-      // Wait for connection to be ready (30s timeout)
-      await entersState(connection, VoiceConnectionStatus.Ready, 30_000);
-
-      const player = createAudioPlayer({
-        behaviors: { noSubscriber: NoSubscriberBehavior.Pause },
-      });
-
-      // Handle player errors
-      player.on("error", (err) => {
-        logger.error(`Audio player error [${guildId}]:`, err);
-      });
-
-      player.on(AudioPlayerStatus.Playing, () => {
-        logger.debug(`Player status: Playing [${guildId}]`);
-      });
-
-      player.on(AudioPlayerStatus.Idle, () => {
-        logger.debug(`Player status: Idle [${guildId}]`);
-      });
-
-      player.on(AudioPlayerStatus.Paused, () => {
-        logger.debug(`Player status: Paused [${guildId}]`);
-      });
-
-      connection.subscribe(player);
-
-      state.connection = connection;
-      state.player = player;
-
-      // Ensure bot member info is available
-      try {
-        await voiceChannel.guild.members.fetchMe();
-      } catch (err) {
-        logger.warn(`Could not fetch bot member info [${guildId}]:`, err);
-      }
-
-      // Handle unexpected connection drops
-      connection.on("error", (err) => {
-        logger.error(`Voice connection error [${guildId}]:`, err);
-        this.cleanup(guildId);
-      });
-
-      logger.info(`Joined voice channel [${guildId}]`);
-      return { connection, player };
-    } catch (err) {
-      logger.error(`Failed to join voice channel [${guildId}]:`, err);
-      throw err;
-    }
-  }
-
-  /**
-   * search()
-   * Searches for a song using play-dl.
-   *
-   * NOTE: We use video.url directly from play-dl's search result objects.
-   * Manually constructing the URL via `video.id` is unreliable — video.id
-   * can be undefined depending on the play-dl version and result type,
-   * which produces an invalid "?v=undefined" URL that breaks play.stream().
-   *
-   * @param {string} query - Song title or direct YouTube URL
-   * @returns {Promise<Object|null>} { title, url, duration, thumbnail, channel }
-   */
-  async search(query) {
-    try {
-      // Handle direct YouTube URLs — skip search, fetch info directly
-      if (query.includes("youtube.com") || query.includes("youtu.be")) {
-        const info = await play.video_info(query);
-        return {
-          title: info.video_details.title,
-          url: query,
-          duration: info.video_details.durationInSec,
-          thumbnail: info.video_details.thumbnails.at(-1)?.url,
-          channel: info.video_details.channel?.name ?? "Unknown",
-        };
-      }
-
-      // Search YouTube by query string
-      const results = await play.search(query, { limit: 1 });
-      if (!results || results.length === 0) {
-        logger.warn(`No search results found for query: "${query}"`);
-        return null;
-      }
-
-      const video = results[0];
-
-      // Use video.url directly — it is always present on play-dl search results.
-      // Do NOT construct from video.id; that field is not guaranteed to exist.
-      const videoUrl = (video.url ?? "").trim();
-
-      if (
-        !videoUrl ||
-        videoUrl.includes("undefined") ||
-        !/^https?:\/\//i.test(videoUrl)
-      ) {
-        logger.warn(
-          `Search result returned invalid URL for query: "${query}" — got: ${videoUrl}`,
-        );
-        return null;
-      }
-
-      logger.debug(`Search result URL: ${videoUrl}`);
-
-      return {
-        title: video.title,
-        url: videoUrl,
-        duration: video.durationInSec,
-        thumbnail: video.thumbnail?.url ?? null,
-        channel: video.channel?.name ?? "Unknown",
-      };
-    } catch (err) {
-      logger.error(`Search error for query "${query}": ${err.message}`);
-      return null;
-    }
-  }
-
-  /**
-   * addToQueue()
-   * Adds a track object to the guild's queue.
-   *
-   * @param {string} guildId
-   * @param {Object} track { title, url, duration, thumbnail, channel, requesterId, requesterName }
-   */
-  addToQueue(guildId, track) {
-    const state = this.getGuildState(guildId);
-    state.queue.push(track);
-    logger.debug(`Added to queue [${guildId}]: ${track.title}`);
-  }
-
-  /**
-   * play()
-   * Dequeues and plays the next track.
-   *
-   * Includes a URL validity guard — if a track somehow has a malformed or
-   * missing URL (e.g., "?v=undefined"), it is skipped rather than crashing.
-   *
-   * @param {string} guildId
-   * @returns {Promise<Object|null>} The track now playing, or null if queue is empty
-   */
-  async play(guildId) {
-    const state = this.getGuildState(guildId);
-
-    if (!state.player) {
-      logger.warn(`No player available for guild ${guildId}`);
-      return null;
-    }
-
-    // Dequeue the next track
-    const track = state.queue.shift();
-
-    if (!track) {
-      state.currentTrack = null;
-      state.player.stop();
-      logger.debug(`Queue empty [${guildId}]`);
-      return null;
-    }
-
-    // Guard: reject tracks with missing or malformed URLs before attempting to stream.
-    // This catches any invalid or malformed URLs that would otherwise cause
-    // play.stream() to throw "Invalid URL".
-    const trackUrl = typeof track.url === "string" ? track.url.trim() : "";
-    if (
-      !trackUrl ||
-      trackUrl.includes("undefined") ||
-      !/^https?:\/\//i.test(trackUrl)
-    ) {
-      logger.error(
-        `Skipping track with invalid URL [${guildId}]: "${track.url}" — Title: ${track.title}`,
-      );
-      return this.play(guildId); // skip to next track
-    }
-
-    try {
-      logger.debug(`Streaming URL [${guildId}]: ${trackUrl}`);
-
-      // play.stream() must receive a URL string — not a video object.
-      // Passing a video object causes "i.trim is not a function".
-      const stream = await play.stream(trackUrl);
-
-      if (!stream || !stream.stream) {
-        throw new Error("Stream returned null or undefined");
-      }
-
-      const resource = createAudioResource(stream.stream, {
-        inputType: stream.type,
-        inlineVolume: true,
-      });
-
-      // Apply stored volume so it persists across tracks.
-      resource.volume?.setVolume(state.volume ?? 1.0);
-
-      state.currentTrack = track;
-      state.isPaused = false;
-      state.player.play(resource);
-
-      logger.info(`Now playing [${guildId}]: ${track.title}`);
-      return track;
-    } catch (err) {
-      logger.error(
-        `Failed to play track [${guildId}]: "${track.title}" — ${err.message} : URL: ${track.url}`,
-      );
-      // Skip the failed track and attempt the next one
-      return this.play(guildId);
-    }
-  }
-
-  /**
-   * setupAutoPlay()
-   * Binds an Idle listener to automatically advance the queue when a track ends.
-   * Removes any existing Idle listener first to prevent duplicates.
-   *
-   * Loop mode behaviour:
-   *   "off" — advance to next track normally
-   *   "one" — re-insert the finished track at the front of the queue
-   *   "all" — push the finished track to the back of the queue
-   *
-   * @param {string} guildId
-   * @param {Function} onTrackEnd - Called with the next track (or null if queue ended)
-   */
-  setupAutoPlay(guildId, onTrackEnd) {
-    const state = this.getGuildState(guildId);
-    if (!state.player) return;
-
-    // Remove stale listeners before adding a new one
-    state.player.removeAllListeners(AudioPlayerStatus.Idle);
-
-    state.player.on(AudioPlayerStatus.Idle, async () => {
-      // Skip if this Idle event was triggered by a manual skip/stop —
-      // those operations set _skipIdle to suppress the auto-advance.
-      if (state._skipIdle) {
-        state._skipIdle = false;
-        return;
-      }
-
-      // Apply loop mode before advancing the queue.
-      const finished = state.currentTrack;
-      if (finished) {
-        if (state.loopMode === "one") {
-          // Re-insert at the front so play() picks it up next.
-          state.queue.unshift(finished);
-        } else if (state.loopMode === "all") {
-          // Push to the back to cycle through the full queue.
-          state.queue.push(finished);
-        }
-      }
-
-      const nextTrack = await this.play(guildId);
-
-      if (onTrackEnd) {
-        onTrackEnd(nextTrack);
-      }
-
-      // Disconnect if nothing left to play
-      if (!nextTrack) {
-        this.leaveVoice(guildId);
+    this.distube.on("playSong", (queue, song) => {
+      logger.info(`Now playing [${queue.id}]: ${song.name}`);
+      const cb = this._callbacks.get(queue.id);
+      if (cb?.onPlay) {
+        this._callbacks.delete(queue.id);
+        cb.onPlay(queue, song);
       }
     });
+
+    this.distube.on("addSong", (queue, song) => {
+      logger.debug(`Added to queue [${queue.id}]: ${song.name}`);
+      const cb = this._callbacks.get(queue.id);
+      if (cb?.onAdd) {
+        this._callbacks.delete(queue.id);
+        cb.onAdd(queue, song);
+      }
+    });
+
+    this.distube.on("finish", (queue) => {
+      logger.info(`Queue finished [${queue.id}]`);
+    });
+
+    this.distube.on("disconnect", (queue) => {
+      logger.info(`Disconnected [${queue.id}]`);
+      this._callbacks.delete(queue.id);
+    });
+
+    this.distube.on("error", (error, queue) => {
+      logger.error(`DisTube error [${queue?.id ?? "unknown"}]:`, error);
+      const cb = this._callbacks.get(queue?.id);
+      if (cb?.onErr) {
+        this._callbacks.delete(queue.id);
+        cb.onErr(error, queue);
+      }
+    });
+
+    logger.info("DisTube initialized.");
+    return this.distube;
   }
 
-  /**
-   * pause()
-   * Pauses the currently playing track.
-   *
-   * @returns {boolean} true if paused successfully, false otherwise
-   */
-  pause(guildId) {
-    const state = this.getGuildState(guildId);
-    if (
-      state.player &&
-      state.player.state.status === AudioPlayerStatus.Playing
-    ) {
-      state.player.pause();
-      state.isPaused = true;
-      logger.debug(`Paused [${guildId}]`);
-      return true;
-    }
-    return false;
-  }
+  // ─── Callback registration (used by play.js) ──────────────────────────────
 
   /**
-   * resume()
-   * Resumes a paused track.
-   *
-   * @returns {boolean} true if resumed successfully, false otherwise
-   */
-  resume(guildId) {
-    const state = this.getGuildState(guildId);
-    if (
-      state.player &&
-      state.player.state.status === AudioPlayerStatus.Paused
-    ) {
-      state.player.unpause();
-      state.isPaused = false;
-      logger.debug(`Resumed [${guildId}]`);
-      return true;
-    }
-    return false;
-  }
-
-  /**
-   * skip()
-   * Stops the current track and immediately plays the next one in queue.
-   *
-   * Sets _skipIdle = true before stopping so the Idle event fired by
-   * player.stop() does not trigger the auto-play handler — we call
-   * play() directly here instead.
-   *
-   * @returns {Promise<Object|null>} Next track or null if queue is empty
-   */
-  async skip(guildId) {
-    const state = this.getGuildState(guildId);
-    if (state.player) {
-      // Suppress the Idle listener so it doesn't double-advance the queue.
-      state._skipIdle = true;
-      state.player.stop();
-      return this.play(guildId);
-    }
-    return null;
-  }
-
-  /**
-   * stop()
-   * Stops playback and clears the queue entirely.
-   */
-  stop(guildId) {
-    const state = this.getGuildState(guildId);
-    if (state.player) {
-      // Suppress the Idle listener so it doesn't try to auto-play after stop.
-      state._skipIdle = true;
-      state.player.stop();
-    }
-    state.queue = [];
-    state.currentTrack = null;
-    state.isPaused = false;
-    logger.debug(`Stopped and queue cleared [${guildId}]`);
-  }
-
-  /**
-   * setVolume()
-   * Sets the playback volume (0.0–1.0 scale) and persists it on guild state
-   * so new tracks automatically start at the same level.
+   * setPendingCallback()
+   * Registers per-guild one-shot callbacks for the next play() call.
+   * Called by play.js before invoking musicManager.play().
    *
    * @param {string} guildId
-   * @param {number} volume  0.0 (mute) to 1.0 (full)
-   * @returns {boolean} true if applied to the active resource, false otherwise
+   * @param {{ onPlay, onAdd, onErr }} callbacks
    */
-  setVolume(guildId, volume) {
-    const state = this.getGuildState(guildId);
-    // Clamp to valid range.
-    state.volume = Math.max(0, Math.min(1, volume));
-    // Apply immediately if a resource is active.
-    const resource = state.player?.state?.resource;
-    if (resource?.volume) {
-      resource.volume.setVolume(state.volume);
-      return true;
-    }
-    return false;
+  setPendingCallback(guildId, callbacks) {
+    this._callbacks.set(guildId, callbacks);
   }
 
   /**
-   * setLoopMode()
-   * Sets the loop mode for the guild.
-   *
-   * @param {string} mode - "off" | "one" | "all"
-   * @returns {boolean} true if mode was valid and set, false otherwise
+   * clearPendingCallback()
+   * Removes any pending callback for a guild (used by the timeout fallback).
    */
-  setLoopMode(guildId, mode) {
-    const state = this.getGuildState(guildId);
-    if (!["off", "one", "all"].includes(mode)) {
-      return false;
+  clearPendingCallback(guildId) {
+    this._callbacks.delete(guildId);
+  }
+
+  // ─── Helpers ───────────────────────────────────────────────────────────────
+
+  _d() {
+    if (!this.distube) throw new Error("DisTube not initialized. Call initDistube(client) first.");
+    return this.distube;
+  }
+
+  _normalizeRepeat(mode) {
+    switch (mode) {
+      case "one": return RepeatMode.SONG;
+      case "all": return RepeatMode.QUEUE;
+      default:    return RepeatMode.DISABLED;
     }
-    state.loopMode = mode;
-    logger.debug(`Loop mode set to "${mode}" [${guildId}]`);
+  }
+
+  _repeatToString(repeatMode) {
+    switch (repeatMode) {
+      case RepeatMode.SONG:  return "one";
+      case RepeatMode.QUEUE: return "all";
+      default:               return "off";
+    }
+  }
+
+  _songToTrack(song) {
+    return {
+      title: song.name ?? "Unknown",
+      url: song.url,
+      duration: song.duration ?? 0,
+      thumbnail: song.thumbnail ?? null,
+      channel: song.uploader?.name ?? song.member?.user?.username ?? "Unknown",
+      requesterId: song.member?.id ?? "",
+      requesterName: song.member?.user?.username ?? "Unknown",
+    };
+  }
+
+  // ─── Public API ────────────────────────────────────────────────────────────
+
+  async play(voiceChannel, query, member, textChannel) {
+    await this._d().play(voiceChannel, query, { member, textChannel });
+  }
+
+  pause(guildId) {
+    const queue = this._d().getQueue(guildId);
+    if (!queue || queue.paused) return false;
+    queue.pause();
     return true;
   }
 
-  /**
-   * getQueue()
-   * Returns the current queue array (does not include the now-playing track).
-   */
-  getQueue(guildId) {
-    const state = this.getGuildState(guildId);
-    return state.queue;
+  resume(guildId) {
+    const queue = this._d().getQueue(guildId);
+    if (!queue || !queue.paused) return false;
+    queue.resume();
+    return true;
   }
 
-  /**
-   * getCurrentTrack()
-   * Returns the currently playing track object, or null.
-   */
+  async skip(guildId) {
+    const queue = this._d().getQueue(guildId);
+    if (!queue) return null;
+    return queue.skip();
+  }
+
+  async stop(guildId) {
+    const queue = this._d().getQueue(guildId);
+    if (queue) await queue.stop();
+  }
+
+  async leaveVoice(guildId) {
+    await this.stop(guildId);
+  }
+
+  setVolume(guildId, volume) {
+    const queue = this._d().getQueue(guildId);
+    if (!queue) return false;
+    queue.setVolume(Math.round(Math.max(0, Math.min(100, volume))));
+    return true;
+  }
+
+  setLoopMode(guildId, mode) {
+    if (!["off", "one", "all"].includes(mode)) return false;
+    const queue = this._d().getQueue(guildId);
+    if (!queue) return false;
+    queue.setRepeatMode(this._normalizeRepeat(mode));
+    return true;
+  }
+
   getCurrentTrack(guildId) {
-    const state = this.getGuildState(guildId);
-    return state.currentTrack;
+    const queue = this._d().getQueue(guildId);
+    if (!queue?.songs?.[0]) return null;
+    return this._songToTrack(queue.songs[0]);
   }
 
-  /**
-   * getState()
-   * Returns the full GuildMusicState for debugging or status commands.
-   */
+  getQueue(guildId) {
+    const queue = this._d().getQueue(guildId);
+    if (!queue?.songs) return [];
+    return queue.songs.slice(1).map((s) => this._songToTrack(s));
+  }
+
   getState(guildId) {
-    return this.getGuildState(guildId);
-  }
-
-  /**
-   * leaveVoice()
-   * Destroys the voice connection and cleans up all guild state.
-   */
-  leaveVoice(guildId) {
-    const state = this.getGuildState(guildId);
-    if (state.connection) {
-      state.connection.destroy();
-      logger.info(`Left voice channel [${guildId}]`);
-    }
-    this.cleanup(guildId);
-  }
-
-  /**
-   * cleanup()
-   * Resets all music state for a guild and removes it from the map.
-   */
-  cleanup(guildId) {
-    const state = this.getGuildState(guildId);
-    state.connection = null;
-    state.player = null;
-    state.queue = [];
-    state.currentTrack = null;
-    state.isPaused = false;
-    this.guilds.delete(guildId);
+    const queue = this._d().getQueue(guildId);
+    return {
+      connection: queue ? true : null,
+      player: queue ? true : null,
+      currentTrack: this.getCurrentTrack(guildId),
+      queue: this.getQueue(guildId),
+      isPaused: queue?.paused ?? false,
+      loopMode: this._repeatToString(queue?.repeatMode),
+      volume: queue?.volume ?? 100,
+    };
   }
 }
 
-// Export as singleton — one MusicManager handles all guilds
 const musicManager = new MusicManager();
 module.exports = musicManager;

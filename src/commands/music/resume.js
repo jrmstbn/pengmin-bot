@@ -20,14 +20,14 @@ module.exports = {
     if (!state.currentTrack) {
       return interaction.reply({
         embeds: [createErrorEmbed("No song is currently playing.")],
-        ephemeral: true,
+        flags: 64,
       });
     }
 
     if (!state.isPaused) {
       return interaction.reply({
         embeds: [createErrorEmbed("The song is already playing.")],
-        ephemeral: true,
+        flags: 64,
       });
     }
 
@@ -41,7 +41,7 @@ module.exports = {
 
     return interaction.reply({
       embeds: [createErrorEmbed("Failed to resume the song.")],
-      ephemeral: true,
+      flags: 64,
     });
   },
 };

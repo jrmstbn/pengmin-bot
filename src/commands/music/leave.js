@@ -7,6 +7,7 @@
 const { SlashCommandBuilder } = require("discord.js");
 const musicManager = require("../../music/musicManager");
 const { createInfoEmbed, createErrorEmbed } = require("../../music/musicUtils");
+const logger = require("../../utils/logger");
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -20,14 +21,21 @@ module.exports = {
     if (!state.connection) {
       return interaction.reply({
         embeds: [createErrorEmbed("The bot is not in a voice channel.")],
-        ephemeral: true,
+        flags: 64,
       });
     }
 
-    musicManager.leaveVoice(guildId);
-
-    return interaction.reply({
-      embeds: [createInfoEmbed("👋 Left", "Disconnected from the voice channel.")],
-    });
+    try {
+      await musicManager.leaveVoice(guildId);
+      return interaction.reply({
+        embeds: [createInfoEmbed("👋 Left", "Disconnected from the voice channel.")],
+      });
+    } catch (err) {
+      logger.error(`Leave command error:`, err);
+      return interaction.reply({
+        embeds: [createErrorEmbed("Failed to disconnect.")],
+        flags: 64,
+      });
+    }
   },
 };
