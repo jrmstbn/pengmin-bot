@@ -11,9 +11,43 @@
  */
 
 const { DisTube, RepeatMode } = require("distube");
-const { YouTubePlugin } = require("@distube/youtube");
+const { YtDlpPlugin, download } = require("@distube/yt-dlp");
 const ffmpegPath = require("ffmpeg-static");
+const { execSync, execFile } = require("child_process");
+const path = require("path");
 const logger = require("../utils/logger");
+
+// Path to the bundled yt-dlp binary (downloaded on first boot)
+const YTDLP_BIN = path.join(
+  path.dirname(require.resolve("@distube/yt-dlp")),
+  "..",
+  "bin",
+  process.platform === "win32" ? "yt-dlp.exe" : "yt-dlp"
+);
+
+/**
+ * ytdlpJson()
+ * Runs yt-dlp with --dump-single-json and returns parsed output.
+ * Uses execFile with separate stdout/stderr so deprecation warnings
+ * on stderr never contaminate the JSON on stdout.
+ */
+function ytdlpJson(query) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      YTDLP_BIN,
+      [query, "--dump-single-json", "--no-warnings", "--skip-download", "--simulate", "--quiet"],
+      { maxBuffer: 50 * 1024 * 1024 }, // 50MB — info JSON can be large
+      (err, stdout, stderr) => {
+        if (err) return reject(new Error(stderr || err.message));
+        try {
+          resolve(JSON.parse(stdout));
+        } catch (parseErr) {
+          reject(new Error(`yt-dlp JSON parse failed: ${stdout.slice(0, 200)}`));
+        }
+      }
+    );
+  });
+}
 
 class MusicManager {
   constructor() {
@@ -35,12 +69,29 @@ class MusicManager {
    *
    * @param {import("discord.js").Client} client
    */
-  initDistube(client) {
+  async initDistube(client) {
+    // Auto-download yt-dlp binary if not found in PATH or local bin.
+    // @distube/yt-dlp bundles a download() helper that fetches the correct
+    // platform binary into node_modules/@distube/yt-dlp/bin/ automatically.
+    try {
+      const version = execSync("yt-dlp --version", { timeout: 5000 }).toString().trim();
+      logger.info(`yt-dlp found in PATH: v${version}`);
+    } catch {
+      logger.info("yt-dlp not found in PATH — downloading bundled binary...");
+      try {
+        const version = await download();
+        logger.info(`yt-dlp downloaded: v${version}`);
+      } catch (err) {
+        logger.error("Failed to download yt-dlp binary:", err.message);
+        logger.warn("Music playback may not work. Install yt-dlp manually: pip install yt-dlp");
+      }
+    }
+
     // Tell DisTube where ffmpeg lives — uses the bundled ffmpeg-static binary.
     process.env.FFMPEG_PATH = ffmpegPath;
 
     this.distube = new DisTube(client, {
-      plugins: [new YouTubePlugin()],
+      plugins: [new YtDlpPlugin({ update: true })],
       ffmpeg: { path: ffmpegPath },
       emitNewSongOnly: false,
       joinNewVoiceChannel: true,
@@ -151,7 +202,29 @@ class MusicManager {
   // ─── Public API ────────────────────────────────────────────────────────────
 
   async play(voiceChannel, query, member, textChannel) {
-    await this._d().play(voiceChannel, query, { member, textChannel });
+    // @distube/yt-dlp is a "playable-extractor" — it handles URLs only.
+    // DisTube's internal #searchSong() requires an "extractor" plugin for text queries.
+    // So we resolve text queries to a direct YouTube URL ourselves via yt-dlp,
+    // then pass the URL to DisTube which the plugin can handle.
+    const isUrl = /^https?:\/\//i.test(query.trim());
+    let resolvedUrl = query;
+
+    if (!isUrl) {
+      try {
+        logger.debug(`Resolving text query via yt-dlp: "${query}"`);
+        const result = await ytdlpJson(`ytsearch:${query}`);
+        // ytsearch returns a playlist wrapper — first entry is the top result
+        const entry = result.entries?.[0] ?? result;
+        if (!entry?.webpage_url) throw new Error("No URL in yt-dlp result");
+        resolvedUrl = entry.webpage_url;
+        logger.debug(`Resolved to URL: ${resolvedUrl}`);
+      } catch (err) {
+        logger.error(`yt-dlp search failed for "${query}":`, err.message);
+        throw err;
+      }
+    }
+
+    await this._d().play(voiceChannel, resolvedUrl, { member, textChannel });
   }
 
   pause(guildId) {

@@ -48,7 +48,7 @@ async function createBot() {
   });
 
   // Initialize DisTube — must happen before any music commands run.
-  musicManager.initDistube(client);
+  await musicManager.initDistube(client);
 
   // ─── Load slash commands ──────────────────────────────────────────────────
   const commandHandler = new CommandHandler(client);

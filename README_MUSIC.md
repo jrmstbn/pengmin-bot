@@ -157,8 +157,10 @@ pengmin-bot/
 ## 🚀 Quick Start (30 Seconds)
 
 ```bash
-# 1. Verify FFmpeg
-ffmpeg -version
+# 1. Install yt-dlp (required for YouTube streaming)
+pip install yt-dlp        # Linux/macOS server
+# or
+pip3 install yt-dlp       # if pip points to Python 2
 
 # 2. Start bot
 node index.js
@@ -166,6 +168,10 @@ node index.js
 # 3. Test in Discord
 /play query: Bohemian Rhapsody
 ```
+
+> **Note:** `yt-dlp` must be installed and available in `PATH` on the machine running the bot.
+> The bot will warn on startup if it cannot find the binary.
+> FFmpeg is bundled automatically — no separate install needed.
 
 For detailed setup, see [MUSIC_SETUP.md](MUSIC_SETUP.md).
 
@@ -216,10 +222,10 @@ For detailed setup, see [MUSIC_SETUP.md](MUSIC_SETUP.md).
 
 ## 🔧 Technology Stack
 
-- **@discordjs/voice** - Voice connections
-- **play-dl** - YouTube search & streaming
+- **distube** - Music framework (v5)
+- **@distube/yt-dlp** - YouTube streaming via yt-dlp
+- **ffmpeg-static** - Bundled FFmpeg binary
 - **discord.js** - Discord API
-- **FFmpeg** - Audio processing
 
 ---
 
