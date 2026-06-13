@@ -129,13 +129,36 @@ class MusicManager {
       this._callbacks.delete(queue.id);
     });
 
-    this.distube.on("error", (error, queue) => {
-      logger.error(`DisTube error [${queue?.id ?? "unknown"}]:`, error);
+    this.distube.on("error", async (error, queue) => {
+      const guildId = queue?.id ?? "unknown";
+      logger.error(`DisTube error [${guildId}]:`, error);
+
+      // ── Dispatch to any pending one-shot callback (e.g. from play.js) ──
       const cb = this._callbacks.get(queue?.id);
       if (cb?.onErr) {
         this._callbacks.delete(queue.id);
         cb.onErr(error, queue);
+        return;
       }
+
+      // ── Auto-recovery: skip to the next song on mid-queue errors ────────
+      // Only attempt if there are more songs queued and the error looks
+      // transient (network, extraction failure, etc.).
+      if (queue && queue.songs && queue.songs.length > 1) {
+        const isTransient = this._isTransientError(error);
+        if (isTransient) {
+          logger.warn(`[Music] Transient error — auto-skipping to next song [${guildId}]`);
+          try {
+            await queue.skip();
+          } catch (skipErr) {
+            logger.error(`[Music] Auto-skip failed [${guildId}]:`, skipErr.message);
+          }
+          return;
+        }
+      }
+
+      // No recovery possible — log and let the queue finish naturally.
+      logger.warn(`[Music] Unrecoverable error, queue may stop [${guildId}]: ${error.message}`);
     });
 
     logger.info("DisTube initialized.");
@@ -165,6 +188,35 @@ class MusicManager {
   }
 
   // ─── Helpers ───────────────────────────────────────────────────────────────
+
+  /**
+   * _isTransientError()
+   * Returns true for errors that are likely temporary (network, extraction)
+   * and worth auto-recovering from by skipping to the next song.
+   * Returns false for errors that suggest a systemic problem.
+   */
+  _isTransientError(error) {
+    if (!error) return false;
+    const msg = (error.message || "").toLowerCase();
+    const transientKeywords = [
+      "network",
+      "econnreset",
+      "enotfound",
+      "etimedout",
+      "socket hang up",
+      "unavailable",
+      "private video",
+      "video unavailable",
+      "age-restricted",
+      "not available",
+      "no formats",
+      "could not extract",
+      "403",
+      "429",
+      "rate limit",
+    ];
+    return transientKeywords.some((kw) => msg.includes(kw));
+  }
 
   _d() {
     if (!this.distube) throw new Error("DisTube not initialized. Call initDistube(client) first.");

@@ -6,6 +6,7 @@
  */
 
 require("dotenv").config();
+const http = require("http");
 const { createBot } = require("./src/bot");
 const logger = require("./src/utils/logger");
 
@@ -28,12 +29,50 @@ process.on("uncaughtException", (err) => {
 });
 
 // Boot the bot.
+let botClient = null;
+
+// ── Health check HTTP server ──────────────────────────────────────────────────
+// Responds 200 on GET /health so uptime monitors (UptimeRobot, Railway, etc.)
+// can confirm the process is alive. Disabled if HEALTH_PORT is set to "0".
+const HEALTH_PORT = parseInt(process.env.HEALTH_PORT || "8080");
+if (HEALTH_PORT > 0) {
+  http
+    .createServer((req, res) => {
+      const isReady = botClient?.isReady() ?? false;
+      res.writeHead(isReady ? 200 : 503, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: isReady ? "ok" : "starting" }));
+    })
+    .listen(HEALTH_PORT, () => {
+      logger.info(`[Health] HTTP server listening on port ${HEALTH_PORT}`);
+    });
+}
+
 (async () => {
   try {
-    const client = await createBot();
-    await client.login(process.env.DISCORD_TOKEN);
+    botClient = await createBot();
+    await botClient.login(process.env.DISCORD_TOKEN);
   } catch (err) {
     logger.error("Failed to start bot:", err);
     process.exit(1);
   }
 })();
+
+// ── Graceful shutdown ─────────────────────────────────────────────────────────
+// Flush any pending state and disconnect cleanly on SIGTERM (Docker/PM2 stop)
+// and SIGINT (Ctrl+C during development).
+async function shutdown(signal) {
+  logger.info(`[Shutdown] Received ${signal}. Shutting down gracefully...`);
+  try {
+    if (botClient) {
+      // Let discord.js close the WebSocket connection cleanly.
+      botClient.destroy();
+      logger.info("[Shutdown] Discord client destroyed.");
+    }
+  } catch (err) {
+    logger.error("[Shutdown] Error during cleanup:", err);
+  }
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT",  () => shutdown("SIGINT"));

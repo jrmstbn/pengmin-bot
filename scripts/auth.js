@@ -1,23 +1,24 @@
 /**
- * scripts/auth.js — YouTube OAuth Helper
+ * scripts/auth.js — YouTube OAuth Helper (Legacy)
  *
- * Authenticates play-dl with YouTube and saves the session token to
- * .data/youtube.data — the same path play-dl reads from at startup.
+ * NOTE: This script was used when the bot relied on play-dl for YouTube
+ * playback. The bot now uses @distube/yt-dlp, which does NOT require OAuth
+ * authentication. You do not need to run this script for normal operation.
  *
- * Run this once before starting the bot, and again whenever the bot
- * starts logging "Invalid URL" errors on valid YouTube links (expired session).
+ * It is kept here for reference in case you switch back to play-dl or need
+ * to authenticate a play-dl instance for a different use case.
  *
- * Usage:
+ * Usage (only if using play-dl):
  *   node scripts/auth.js
+ *
+ * play-dl will save the token to .data/youtube.data, which it reads at startup.
+ * Re-run if you see "Invalid URL" errors on valid YouTube links (expired session).
  */
 
-const path = require("path");
 const play = require("play-dl");
 
 (async () => {
   try {
-    // Tell play-dl where to save (and later read) the token.
-    // This must match the path used in index.js.
     play.setToken({
       useragent: ["Mozilla/5.0 (Windows NT 10.0; Win64; x64)"],
     });
