@@ -5,12 +5,13 @@
  *   Tier 1 (Hot)  — In-process Map for instant access
  *   Tier 2 (Cold) — PostgreSQL for persistence across restarts (optional)
  *
- * When history grows beyond MAX_HISTORY_TOKENS, older messages are
- * compressed via the AI summarizer and stored as a single "summary" string.
- * This keeps token usage bounded while preserving long-term context.
+ * Memory is now keyed per USER per GUILD (not per channel). This means the
+ * bot remembers a user across all channels in a server, giving cross-channel
+ * context awareness. DMs use "DM" as the guild key.
  *
- * Architecture decision: All callers use getHistory()/saveHistory().
- * Swapping the persistence backend requires changing only this file.
+ * When history grows beyond SUMMARIZE_THRESHOLD, older messages are compressed
+ * via the AI summarizer and stored as a single "summary" string. This keeps
+ * token usage bounded while preserving long-term context.
  */
 
 const logger = require("../utils/logger");
@@ -20,44 +21,43 @@ const db = require("./database");
 // ── Configuration ─────────────────────────────────────────────────────────────
 
 const MAX_MESSAGES = parseInt(process.env.MAX_HISTORY_MESSAGES || "20");
-// When history exceeds this size, we summarize the oldest half.
 const SUMMARIZE_THRESHOLD = parseInt(process.env.SUMMARIZE_THRESHOLD || "16");
 
 // ── In-memory cache ───────────────────────────────────────────────────────────
-// Key: `${userId}:${channelId}` → { history: [], summary: "" }
+// Key: `${userId}:${guildId}` → { history: [], summary: "" }
 const cache = new Map();
 
-// Ensure the DB schema exists on startup. Fire-and-forget — if DB is disabled
-// this is a no-op; if it fails we log and continue with in-memory only.
+// Ensure the DB schema exists on startup.
 db.initialize().catch((err) =>
-  logger.error("[Memory] DB initialization failed:", err.message),
+  logger.error("[Memory] DB initialization failed:", err.message)
 );
 
 /**
  * getHistory()
- * Returns the active conversation history and any compressed summary
- * for the given user+channel pair.
+ * Returns the conversation history and any compressed summary
+ * for the given user+guild pair.
  *
  * @param {string} userId
- * @param {string} channelId
+ * @param {string} guildId
  * @returns {Promise<{ history: Array, summary: string }>}
  */
-async function getHistory(userId, channelId) {
-  const key = cacheKey(userId, channelId);
+async function getHistory(userId, guildId) {
+  const key = cacheKey(userId, guildId);
 
-  // Return from hot cache if available.
   if (cache.has(key)) return cache.get(key);
 
-  // Otherwise, attempt a DB lookup.
   if (db.isEnabled()) {
-    const record = await db.loadHistory(userId, channelId);
-    if (record) {
-      cache.set(key, record);
-      return record;
+    try {
+      const record = await db.loadHistory(userId, guildId);
+      if (record) {
+        cache.set(key, record);
+        return record;
+      }
+    } catch (err) {
+      logger.error("[Memory] DB load failed, using empty history:", err.message);
     }
   }
 
-  // Cold start — return empty state.
   const fresh = { history: [], summary: "" };
   cache.set(key, fresh);
   return fresh;
@@ -69,11 +69,11 @@ async function getHistory(userId, channelId) {
  * if the history grows too long.
  *
  * @param {string} userId
- * @param {string} channelId
+ * @param {string} guildId
  * @param {Array}  newHistory  Full updated history array.
  */
-async function saveHistory(userId, channelId, newHistory) {
-  const key = cacheKey(userId, channelId);
+async function saveHistory(userId, guildId, newHistory) {
+  const key = cacheKey(userId, guildId);
   const existing = cache.get(key) ?? { history: [], summary: "" };
 
   let { summary } = existing;
@@ -87,24 +87,17 @@ async function saveHistory(userId, channelId, newHistory) {
 
     try {
       const newSummary = await summarize(toSummarize);
-      // Append to any prior summary rather than replacing it.
       summary = summary
         ? `${summary}\n\n[Later summary]:\n${newSummary}`
         : newSummary;
       history = toKeep;
-      logger.debug(
-        `[Memory] Summarized ${toSummarize.length} messages for ${key}`,
-      );
+      logger.debug(`[Memory] Summarized ${toSummarize.length} messages for ${key}`);
     } catch (err) {
-      logger.warn(
-        `[Memory] Summarization failed, trimming instead:`,
-        err.message,
-      );
+      logger.warn("[Memory] Summarization failed, trimming instead:", err.message);
       history = history.slice(-MAX_MESSAGES);
     }
   }
 
-  // Hard cap as a safety net.
   if (history.length > MAX_MESSAGES) {
     history = history.slice(-MAX_MESSAGES);
   }
@@ -112,33 +105,40 @@ async function saveHistory(userId, channelId, newHistory) {
   const record = { history, summary };
   cache.set(key, record);
 
-  // Persist to DB asynchronously — don't block the Discord response.
   if (db.isEnabled()) {
-    db.saveHistory(userId, channelId, record).catch((err) =>
-      logger.error("[Memory] DB save failed:", err.message),
+    db.saveHistory(userId, guildId, record).catch((err) =>
+      logger.error("[Memory] DB save failed:", err.message)
     );
   }
 }
 
 /**
  * clearHistory()
- * Wipes conversation state for a user+channel pair.
- * Called by the /forget slash command.
+ * Wipes conversation state for a user+guild pair.
+ * Called by the /memory forget slash command.
+ *
+ * @param {string} userId
+ * @param {string} guildId
  */
-async function clearHistory(userId, channelId) {
-  const key = cacheKey(userId, channelId);
+async function clearHistory(userId, guildId) {
+  const key = cacheKey(userId, guildId);
   cache.delete(key);
   if (db.isEnabled()) {
-    await db.deleteHistory(userId, channelId);
+    await db.deleteHistory(userId, guildId).catch((err) =>
+      logger.error("[Memory] DB delete failed:", err.message)
+    );
   }
 }
 
 /**
  * getStats()
  * Returns diagnostic info — used by the /memory slash command.
+ *
+ * @param {string} userId
+ * @param {string} guildId
  */
-function getStats(userId, channelId) {
-  const key = cacheKey(userId, channelId);
+function getStats(userId, guildId) {
+  const key = cacheKey(userId, guildId);
   const record = cache.get(key);
   return {
     messages: record?.history?.length ?? 0,
@@ -149,8 +149,8 @@ function getStats(userId, channelId) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-function cacheKey(userId, channelId) {
-  return `${userId}:${channelId}`;
+function cacheKey(userId, guildId) {
+  return `${userId}:${guildId}`;
 }
 
 module.exports = { getHistory, saveHistory, clearHistory, getStats };

@@ -11,7 +11,8 @@
  */
 
 const { DisTube, RepeatMode } = require("distube");
-const { YtDlpPlugin, download } = require("@distube/yt-dlp");
+const { download } = require("@distube/yt-dlp");
+const { YtDlpSafePlugin } = require("./ytdlpPlugin");
 const ffmpegPath = require("ffmpeg-static");
 const { execSync, execFile } = require("child_process");
 const path = require("path");
@@ -91,7 +92,7 @@ class MusicManager {
     process.env.FFMPEG_PATH = ffmpegPath;
 
     this.distube = new DisTube(client, {
-      plugins: [new YtDlpPlugin({ update: true })],
+      plugins: [new YtDlpSafePlugin()],
       ffmpeg: { path: ffmpegPath },
       emitNewSongOnly: false,
       joinNewVoiceChannel: true,
