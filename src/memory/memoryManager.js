@@ -17,6 +17,7 @@
 const logger = require("../utils/logger");
 const { summarize } = require("../ai/aiService");
 const db = require("./database");
+const UserProfileStore = require("./userProfileStore");
 
 // ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -34,33 +35,40 @@ db.initialize().catch((err) =>
 
 /**
  * getHistory()
- * Returns the conversation history and any compressed summary
+ * Returns the conversation history, compressed summary, and user profile
  * for the given user+guild pair.
  *
  * @param {string} userId
  * @param {string} guildId
- * @returns {Promise<{ history: Array, summary: string }>}
+ * @returns {Promise<{ history: Array, summary: string, userProfile: UserProfile }>}
  */
 async function getHistory(userId, guildId) {
   const key = cacheKey(userId, guildId);
 
-  if (cache.has(key)) return cache.get(key);
-
-  if (db.isEnabled()) {
+  let record;
+  if (cache.has(key)) {
+    record = cache.get(key);
+  } else if (db.isEnabled()) {
     try {
-      const record = await db.loadHistory(userId, guildId);
-      if (record) {
-        cache.set(key, record);
-        return record;
+      const dbRecord = await db.loadHistory(userId, guildId);
+      if (dbRecord) {
+        cache.set(key, dbRecord);
+        record = dbRecord;
       }
     } catch (err) {
       logger.error("[Memory] DB load failed, using empty history:", err.message);
     }
   }
 
-  const fresh = { history: [], summary: "" };
-  cache.set(key, fresh);
-  return fresh;
+  if (!record) {
+    record = { history: [], summary: "" };
+    cache.set(key, record);
+  }
+
+  // Load user profile (lightweight — separate table / cache)
+  const userProfile = await UserProfileStore.get(userId, guildId);
+
+  return { ...record, userProfile };
 }
 
 /**

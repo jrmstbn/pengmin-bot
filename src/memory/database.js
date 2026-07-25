@@ -21,6 +21,22 @@
  *     context    TEXT   (world knowledge / lore)
  *     is_active  BOOL   (only one active per guild at a time)
  *     created_at TIMESTAMPTZ
+ *
+ *   user_profiles — per-user personality profiles
+ *     user_id          TEXT
+ *     guild_id         TEXT
+ *     interaction_count INTEGER
+ *     topics_of_interest JSONB
+ *     preferred_tone   TEXT
+ *     notable_facts    JSONB
+ *     sentiment_history JSONB
+ *     last_seen        TIMESTAMPTZ
+ *     created_at       TIMESTAMPTZ
+ *
+ *   proactive_configs — per-guild proactive engine configuration
+ *     guild_id   TEXT
+ *     behaviors  JSONB
+ *     updated_at TIMESTAMPTZ
  */
 
 const logger = require("../utils/logger");
@@ -92,6 +108,31 @@ async function initialize() {
       is_active  BOOLEAN     NOT NULL DEFAULT FALSE,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       PRIMARY KEY (guild_id, name)
+    );
+  `);
+
+  // user_profiles: per-user personality and interaction data
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_profiles (
+      user_id            TEXT        NOT NULL,
+      guild_id           TEXT        NOT NULL,
+      interaction_count  INTEGER     NOT NULL DEFAULT 0,
+      topics_of_interest JSONB       NOT NULL DEFAULT '[]',
+      preferred_tone     TEXT        NOT NULL DEFAULT 'neutral',
+      notable_facts      JSONB       NOT NULL DEFAULT '[]',
+      sentiment_history  JSONB       NOT NULL DEFAULT '[]',
+      last_seen          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (user_id, guild_id)
+    );
+  `);
+
+  // proactive_configs: per-guild proactive engine behavior settings
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS proactive_configs (
+      guild_id   TEXT        NOT NULL PRIMARY KEY,
+      behaviors  JSONB       NOT NULL DEFAULT '{}',
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
   `);
 
@@ -239,6 +280,93 @@ function isEnabled() {
   return enabled;
 }
 
+// ── User Profiles ─────────────────────────────────────────────────────────────
+
+/**
+ * loadUserProfile() — Returns stored profile or null.
+ */
+async function loadUserProfile(userId, guildId) {
+  if (!enabled) return null;
+  const { rows } = await pool.query(
+    `SELECT user_id, guild_id, interaction_count, topics_of_interest,
+            preferred_tone, notable_facts, sentiment_history, last_seen, created_at
+     FROM user_profiles WHERE user_id=$1 AND guild_id=$2`,
+    [userId, guildId]
+  );
+  if (!rows.length) return null;
+  const r = rows[0];
+  return {
+    userId: r.user_id,
+    guildId: r.guild_id,
+    interactionCount: r.interaction_count,
+    topicsOfInterest: r.topics_of_interest,
+    preferredTone: r.preferred_tone,
+    notableFacts: r.notable_facts,
+    sentimentHistory: r.sentiment_history,
+    lastSeen: r.last_seen,
+    createdAt: r.created_at,
+  };
+}
+
+/**
+ * saveUserProfile() — Upserts a user profile.
+ */
+async function saveUserProfile(userId, guildId, profile) {
+  if (!enabled) return;
+  await pool.query(
+    `INSERT INTO user_profiles
+       (user_id, guild_id, interaction_count, topics_of_interest,
+        preferred_tone, notable_facts, sentiment_history, last_seen, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+     ON CONFLICT (user_id, guild_id) DO UPDATE
+       SET interaction_count  = EXCLUDED.interaction_count,
+           topics_of_interest = EXCLUDED.topics_of_interest,
+           preferred_tone     = EXCLUDED.preferred_tone,
+           notable_facts      = EXCLUDED.notable_facts,
+           sentiment_history  = EXCLUDED.sentiment_history,
+           last_seen          = EXCLUDED.last_seen`,
+    [
+      userId, guildId,
+      profile.interactionCount,
+      JSON.stringify(profile.topicsOfInterest),
+      profile.preferredTone,
+      JSON.stringify(profile.notableFacts),
+      JSON.stringify(profile.sentimentHistory),
+      profile.lastSeen,
+      profile.createdAt,
+    ]
+  );
+}
+
+// ── Proactive Configs ─────────────────────────────────────────────────────────
+
+/**
+ * loadProactiveConfig() — Returns the stored config for a guild, or null.
+ */
+async function loadProactiveConfig(guildId) {
+  if (!enabled) return null;
+  const { rows } = await pool.query(
+    "SELECT behaviors FROM proactive_configs WHERE guild_id=$1",
+    [guildId]
+  );
+  return rows[0]?.behaviors ?? null;
+}
+
+/**
+ * saveProactiveConfig() — Upserts guild proactive behavior config.
+ */
+async function saveProactiveConfig(guildId, behaviors) {
+  if (!enabled) return;
+  await pool.query(
+    `INSERT INTO proactive_configs (guild_id, behaviors, updated_at)
+     VALUES ($1, $2, NOW())
+     ON CONFLICT (guild_id) DO UPDATE
+       SET behaviors  = EXCLUDED.behaviors,
+           updated_at = NOW()`,
+    [guildId, JSON.stringify(behaviors)]
+  );
+}
+
 module.exports = {
   initialize,
   // memory
@@ -252,5 +380,11 @@ module.exports = {
   setActivePersona,
   deletePersona,
   deactivateAllPersonas,
+  // user profiles
+  loadUserProfile,
+  saveUserProfile,
+  // proactive configs
+  loadProactiveConfig,
+  saveProactiveConfig,
   isEnabled,
 };

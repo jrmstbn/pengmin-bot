@@ -30,12 +30,14 @@ const ROLE_MODIFIERS = {
  * Assembles the full system prompt for a given interaction context.
  *
  * @param {Object} opts
- * @param {string}   opts.persona      The active persona description.
- * @param {string}   opts.context      The active world/lore context.
- * @param {string[]} opts.userRoles    Discord role names the user has.
- * @param {string}   opts.summary      Compressed history summary (if any).
- * @param {string}   opts.channelName  Discord channel name.
- * @param {string}   opts.guildName    Discord server name (for awareness).
+ * @param {string}   opts.persona        The active persona description.
+ * @param {string}   opts.context        The active world/lore context.
+ * @param {string[]} opts.userRoles      Discord role names the user has.
+ * @param {string}   opts.summary        Compressed history summary (if any).
+ * @param {string}   opts.channelName    Discord channel name.
+ * @param {string}   opts.guildName      Discord server name (for awareness).
+ * @param {object}   opts.sentimentHint  SentimentResult from SentimentAnalyzer.
+ * @param {object}   opts.userProfile    UserProfile from UserProfileStore.
  * @returns {string}
  */
 function buildSystemPrompt({
@@ -45,6 +47,8 @@ function buildSystemPrompt({
   summary = "",
   channelName = "",
   guildName = "",
+  sentimentHint = null,
+  userProfile = null,
 } = {}) {
   const roleModifier =
     Object.entries(ROLE_MODIFIERS).find(([role]) => userRoles.includes(role))?.[1] ?? "";
@@ -57,7 +61,9 @@ function buildSystemPrompt({
     context,
     "",
     "## TOOLS AVAILABLE",
-    "You have access to: get_current_time, get_latest_news, search_web, get_gif.",
+    "You have access to: get_current_time, get_latest_news, search_web, get_gif, " +
+    "analyze_image, read_code_snippet, get_weather, translate_text, create_poll, " +
+    "get_server_stats, recall_user_facts, summarize_channel.",
     "Use tools proactively when the user asks about real-world facts, current events, or requests media.",
     "Never fabricate real-world data — always use tools instead.",
     "",
@@ -96,6 +102,29 @@ function buildSystemPrompt({
       "## PRIOR CONVERSATION SUMMARY",
       "The following is a compressed record of earlier exchanges with this user across this server:",
       summary,
+      ""
+    );
+  }
+
+  // ── Sentiment hint ─────────────────────────────────────────────────────
+  if (sentimentHint && sentimentHint.tone === "distressed") {
+    parts.push(
+      "## OPERATOR SIGNAL",
+      "Detected elevated distress in the current operator signal. " +
+      "Maintain composure. Respond with measured clarity. " +
+      "Do not dismiss the signal — acknowledge it through precision, not warmth.",
+      ""
+    );
+  }
+
+  // ── User profile ───────────────────────────────────────────────────────
+  if (userProfile && userProfile.interactionCount > 50) {
+    const topTopics = (userProfile.topicsOfInterest || []).slice(0, 3).join(", ") || "unrecorded";
+    parts.push(
+      "## OPERATOR PROFILE",
+      `Known operator. ${userProfile.interactionCount} recorded interactions. ` +
+      `Notable interests: ${topTopics}. ` +
+      `Preferred signal depth: ${userProfile.preferredTone || "neutral"}.`,
       ""
     );
   }

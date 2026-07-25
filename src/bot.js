@@ -23,6 +23,7 @@ const { handleMessage } = require("./ai/aiController");
 const RateLimiter = require("./middleware/rateLimiter");
 const { sanitizeInput } = require("./middleware/security");
 const musicManager = require("./music/musicManager");
+const proactiveEngine = require("./ai/proactiveEngine");
 
 /**
  * createBot — initializes and returns a fully configured Discord Client.
@@ -70,6 +71,8 @@ async function createBot() {
       activities: [{ name: "the Protocol Network", type: 3 }], // "Watching"
       status: "online",
     });
+    // Initialize proactive engine after client is ready
+    proactiveEngine.init(client);
   });
 
   // Slash command interactions
