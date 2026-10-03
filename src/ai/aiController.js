@@ -22,7 +22,7 @@
 const logger = require("../utils/logger");
 const memoryManager = require("../memory/memoryManager");
 const UserProfileStore = require("../memory/userProfileStore");
-const { chat } = require("./aiService");
+const { chat, extractProfileInsights } = require("./aiService");
 const { buildSystemPrompt } = require("./prompts");
 const { getActivePersona } = require("./personaManager");
 const { chunkMessage } = require("../utils/helpers");
@@ -117,11 +117,15 @@ async function handleMessage(message, content, client) {
     ]);
 
     // ── 10. Update user profile ────────────────────────────────────────────
+    // Base fields are awaited; profile enrichment (topics/facts) runs async
+    // so it never delays the Discord reply.
     await UserProfileStore.update(userId, guildId, {
       interactionCount: (userProfile.interactionCount || 0) + 1,
       sentimentHistory: [sentimentHint.tone],
       preferredTone: sentimentHint.tone === "positive" ? "casual" : userProfile.preferredTone,
     });
+
+    enrichProfileAsync(userId, guildId, content, reply);
 
     // ── 11. Send reply ─────────────────────────────────────────────────────
     if (process.env.STREAMING_ENABLED === "true") {
@@ -244,6 +248,8 @@ async function handleMessageCore(message, content, client, typingInterval) {
       sentimentHistory: [sentimentHint.tone],
     });
 
+    enrichProfileAsync(userId, guildId, content, reply);
+
     const chunks = chunkMessage(reply, 1990);
     for (const chunk of chunks) {
       await message.reply(chunk);
@@ -251,6 +257,37 @@ async function handleMessageCore(message, content, client, typingInterval) {
   } finally {
     clearInterval(typingInterval);
   }
+}
+
+// ── Profile Enrichment ────────────────────────────────────────────────────────
+
+/**
+ * enrichProfileAsync()
+ * Fires a lightweight extraction call after the reply is sent to populate
+ * topicsOfInterest and notableFacts without blocking the response pipeline.
+ *
+ * @param {string} userId
+ * @param {string} guildId
+ * @param {string} userContent   The user's message text.
+ * @param {string} replyContent  The assistant's reply text.
+ */
+function enrichProfileAsync(userId, guildId, userContent, replyContent) {
+  extractProfileInsights(userContent, replyContent)
+    .then(async (insights) => {
+      if (!insights) return;
+      const delta = {};
+      if (insights.topics?.length) delta.topicsOfInterest = insights.topics;
+      if (insights.facts?.length) delta.notableFacts = insights.facts;
+      if (Object.keys(delta).length) {
+        await UserProfileStore.update(userId, guildId, delta);
+        logger.debug(
+          `[Profile] Enriched user=${userId}: topics=${insights.topics?.length ?? 0}, facts=${insights.facts?.length ?? 0}`
+        );
+      }
+    })
+    .catch((err) =>
+      logger.warn("[Profile] Enrichment failed (non-critical):", err.message)
+    );
 }
 
 module.exports = { handleMessage, handleImageMessage };

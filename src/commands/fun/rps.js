@@ -121,10 +121,12 @@ module.exports = {
             max: 1,
           });
           collector.on("collect", async (i) => {
-            await i.deferUpdate();
             picks.set(challengerId, MOVES[buttonIds.indexOf(i.customId)]);
-            resolve();
+            await i.deferUpdate().catch(() => {});
+            // Stop after picking — 'end' will fire and resolve
+            collector.stop("picked");
           });
+          // 'end' always fires after collect or timeout — resolve here only
           collector.on("end", () => resolve());
         });
 

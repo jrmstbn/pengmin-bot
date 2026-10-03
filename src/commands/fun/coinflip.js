@@ -112,9 +112,9 @@ module.exports = {
             max: 1,
           });
           collector.on("collect", async (i) => {
-            await i.deferUpdate();
             picks.set(challengerId, SIDES[buttonIds.indexOf(i.customId)]);
-            resolve();
+            await i.deferUpdate().catch(() => {});
+            collector.stop("picked");
           });
           collector.on("end", () => resolve());
         });
